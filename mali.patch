@@ -1,0 +1,51 @@
+--- a/src/common/settings.h
++++ b/src/common/settings.h
+@@ -679,7 +679,8 @@
+     SwitchableSetting<bool> use_asynchronous_shaders{linkage, true, "use_asynchronous_shaders",
+                                                      Category::RendererHacks};
+ #else
+-    SwitchableSetting<bool> use_asynchronous_shaders{linkage, false, "use_asynchronous_shaders",
++    // Mali build tweak: compile shaders asynchronously by default to avoid hitches on new shaders.
++    SwitchableSetting<bool> use_asynchronous_shaders{linkage, true, "use_asynchronous_shaders",
+                                                      Category::RendererHacks};
+ #endif
+ 
+--- a/src/video_core/vulkan_common/vulkan_device.cpp
++++ b/src/video_core/vulkan_common/vulkan_device.cpp
+@@ -36,6 +36,10 @@
+ #include <android/api-level.h>
+ #endif
+ 
++#if defined(__linux__) || defined(__ANDROID__)
++#include <unistd.h>
++#endif
++
+ namespace Vulkan {
+ using namespace Common::Literals;
+ namespace {
+@@ -1641,7 +1645,24 @@
+     }
+     if (is_integrated) {
+         const s64 available_memory = static_cast<s64>(device_access_memory - device_initial_usage);
+-        const u64 memory_size = Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive ? 6_GiB : 4_GiB;
++        u64 memory_size = Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive ? 6_GiB : 4_GiB;
++#if defined(__linux__) || defined(__ANDROID__)
++        // Mali (shared system RAM): a fixed 4 GiB budget is too large next to the guest's own RAM
++        // and Android's, causing memory pressure and late, stalling cache cleanups. Scale the
++        // budget with the phone's real RAM instead (about 1/4, clamped to 1.5..4 GiB).
++        if (properties.driver.driverID == VK_DRIVER_ID_ARM_PROPRIETARY) {
++            const long pages = sysconf(_SC_PHYS_PAGES);
++            const long page_size = sysconf(_SC_PAGESIZE);
++            if (pages > 0 && page_size > 0) {
++                const u64 total_ram = static_cast<u64>(pages) * static_cast<u64>(page_size);
++                const u64 mali_budget =
++                    std::clamp<u64>(total_ram / 4, 3_GiB / 2, memory_size);
++                memory_size = std::min<u64>(memory_size, mali_budget);
++                LOG_INFO(Render_Vulkan, "Mali memory budget: {} MiB (total RAM {} MiB)",
++                         memory_size / (1024 * 1024), total_ram / (1024 * 1024));
++            }
++        }
++#endif
+         device_access_memory = static_cast<u64>(std::max<s64>(std::min<s64>(available_memory - 8_GiB, memory_size), std::min<s64>(local_memory, memory_size)));
+     } else {
+         const u64 reserve_memory = std::min<u64>(device_access_memory / 8, 1_GiB);
